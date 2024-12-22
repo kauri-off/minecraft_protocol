@@ -1,5 +1,5 @@
 use crate::{
-    types::{num::Integer, var_int::VarInt},
+    types::{packet_io::PacketIO, var_int::VarInt},
     UncompressedPacket,
 };
 
@@ -23,28 +23,20 @@ impl PacketBuilder {
         }
     }
 
-    pub fn write_var_int(mut self, var_int: VarInt) -> Self {
-        let _ = var_int.write_sync(&mut self.data);
+    pub fn write<T: PacketIO>(mut self, data: T) -> Self {
+        let _ = data.write_to(&mut self.data);
         self
     }
 
-    pub fn write_string(mut self, string: String) -> Self {
-        self = self.write_var_int(VarInt(string.len() as i32));
-
-        self.data.extend(string.as_bytes());
+    pub fn write_option<T: PacketIO>(mut self, data: Option<T>) -> Self {
+        let _ = match data {
+            Some(t) => {
+                let _ = true.write_to(&mut self.data);
+                t.write_to(&mut self.data)
+            }
+            None => false.write_to(&mut self.data),
+        };
         self
-    }
-
-    pub fn write_int<I: Integer>(mut self, int: I) -> Self {
-        self.data.extend(int.to_bytes());
-        self
-    }
-
-    pub fn write_bool(self, b: bool) -> Self {
-        match b {
-            true => self.write_buffer(&[1]),
-            false => self.write_buffer(&[0]),
-        }
     }
 
     pub fn write_buffer(mut self, buf: &[u8]) -> Self {

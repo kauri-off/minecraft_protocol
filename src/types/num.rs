@@ -145,4 +145,3 @@ impl Integer for i128 {
         std::mem::size_of::<Self>()
     }
 }
-
