@@ -1,0 +1,10 @@
+[package]
+name = "minecraft_protocol"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+openssl = "0.10.73"
+thiserror = "2.0.12"
+tokio = { version = "1.46.1", features = ["full"] }
+minecraft_protocol_derive = { path = "./minecraft_protocol_derive" }
