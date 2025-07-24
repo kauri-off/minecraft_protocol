@@ -9,6 +9,8 @@ pub enum VarIntError {
     Position,
     #[error("IO Error: {0}")]
     IOError(#[from] io::Error),
+    #[error("NegativeValue")]
+    NegativeValue,
 }
 
 const SEGMENT_BITS: i32 = 0x7F;

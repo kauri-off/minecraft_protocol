@@ -1,30 +1,24 @@
-use std::io::{self, Cursor, Read, Write};
+use std::io::{self, Cursor};
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::{
-    ser::SerializationError,
+    ser::{Deserialize, SerializationError},
     varint::{VarInt, VarIntError},
 };
 
-pub trait PacketIO {
-    fn write<W: Write + Unpin>(&self, writer: &mut W) -> Result<(), SerializationError>;
-
-    fn read<R: Read + Unpin>(reader: &mut R) -> Result<Self, SerializationError>
-    where
-        Self: Sized;
-}
-
 #[derive(Debug, Error)]
 pub enum PacketError {
-    #[error("DecryptionError")]
-    DecryptionError,
-
     #[error("VarIntError: {0}")]
     VarIntError(#[from] VarIntError),
 
     #[error("IO Error: {0}")]
     IOError(#[from] io::Error),
+}
+
+#[derive(Debug, Clone)]
+pub struct CompressedPacket {
+    pub data: Vec<u8>,
 }
 
 #[derive(Debug, Clone)]
@@ -41,8 +35,11 @@ pub struct RawPacket {
 impl RawPacket {
     pub async fn read<R: AsyncReadExt + Unpin>(reader: &mut R) -> Result<Self, PacketError> {
         let len = VarInt::read(reader).await?;
-        let mut buf = vec![0; len.0 as usize];
+        if len.0 < 0 {
+            return Err(VarIntError::NegativeValue.into());
+        }
 
+        let mut buf = vec![0; len.0 as usize];
         reader.read_exact(&mut buf).await?;
 
         Ok(Self { data: buf })
@@ -50,26 +47,39 @@ impl RawPacket {
 
     pub async fn write<W: AsyncWriteExt + Unpin>(&self, writer: &mut W) -> Result<(), PacketError> {
         VarInt(self.data.len() as i32).write(writer).await?;
-
         writer.write_all(&self.data).await?;
-
         Ok(())
     }
 
-    pub fn from_packetio<T: PacketIO>(packet: &T) -> Result<Self, SerializationError> {
-        let mut buf = Vec::new();
-
-        packet.write(&mut buf)?;
-        Ok(Self { data: buf })
-    }
-
-    pub fn as_uncompressed(self) -> Result<UncompressedPacket, PacketError> {
-        let mut cursor = Cursor::new(self.data);
+    pub fn as_uncompressed(&self) -> Result<UncompressedPacket, PacketError> {
+        let mut cursor = Cursor::new(&self.data);
         let packet_id = VarInt::read_sync(&mut cursor)?;
-        let mut payload = Vec::new();
-        std::io::Read::read_to_end(&mut cursor, &mut payload)?;
+        let pos = cursor.position() as usize;
+        let payload = self.data[pos..].to_vec();
 
         Ok(UncompressedPacket { packet_id, payload })
+    }
+
+    pub fn try_uncompress(
+        &self,
+        threshold: Option<i32>,
+    ) -> Result<Option<UncompressedPacket>, PacketError> {
+        if let Some(_) = threshold {
+            let mut cursor = Cursor::new(&self.data);
+            let data_length = VarInt::read_sync(&mut cursor)?;
+
+            if data_length.0 == 0 {
+                let packet_id = VarInt::read_sync(&mut cursor)?;
+                let pos = cursor.position() as usize;
+                let payload = self.data[pos..].to_vec();
+
+                Ok(Some(UncompressedPacket { packet_id, payload }))
+            } else {
+                Ok(None)
+            }
+        } else {
+            self.as_uncompressed().map(Some)
+        }
     }
 }
 
@@ -77,11 +87,32 @@ impl UncompressedPacket {
     pub fn to_raw_packet(&self) -> Result<RawPacket, PacketError> {
         let mut buf = Vec::new();
         self.packet_id.write_sync(&mut buf)?;
-        buf.extend(&self.payload);
+        std::io::Write::write_all(&mut buf, &self.payload)?;
         Ok(RawPacket { data: buf })
     }
 
-    pub fn convert<T: PacketIO>(&self) -> Result<T, SerializationError> {
-        T::read(&mut Cursor::new(&self.payload))
+    pub fn convert<T: Deserialize>(&self) -> Result<T, SerializationError> {
+        T::deserialize(&mut Cursor::new(&self.payload))
+    }
+
+    pub fn compress(&self, threshold: usize) -> Result<CompressedPacket, PacketError> {
+        let raw_packet = self.to_raw_packet()?;
+
+        if raw_packet.data.len() >= threshold {
+            todo!("Implement compression");
+        } else {
+            let mut data = Vec::new();
+            // Prepend VarInt(0) indicating uncompressed data
+            VarInt(0).write_sync(&mut data)?;
+            data.extend_from_slice(&raw_packet.data);
+
+            Ok(CompressedPacket { data })
+        }
+    }
+}
+
+impl CompressedPacket {
+    pub fn to_raw_packet(self) -> RawPacket {
+        RawPacket { data: self.data }
     }
 }
