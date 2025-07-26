@@ -95,10 +95,10 @@ impl UncompressedPacket {
         T::deserialize(&mut Cursor::new(&self.payload))
     }
 
-    pub fn compress(&self, threshold: usize) -> Result<CompressedPacket, PacketError> {
+    pub fn compress(&self, threshold: i32) -> Result<CompressedPacket, PacketError> {
         let raw_packet = self.to_raw_packet()?;
 
-        if raw_packet.data.len() >= threshold {
+        if raw_packet.data.len() >= threshold as usize {
             todo!("Implement compression");
         } else {
             let mut data = Vec::new();
@@ -107,6 +107,13 @@ impl UncompressedPacket {
             data.extend_from_slice(&raw_packet.data);
 
             Ok(CompressedPacket { data })
+        }
+    }
+
+    pub fn compress_to_raw(&self, threshold: Option<i32>) -> Result<RawPacket, PacketError> {
+        match threshold {
+            Some(t) => Ok(self.compress(t)?.to_raw_packet()),
+            None => self.to_raw_packet(),
         }
     }
 }
