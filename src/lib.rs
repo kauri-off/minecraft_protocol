@@ -15,14 +15,14 @@
 //!
 //! ```toml
 //! [dependencies]
-//! mc_protocol = { version = "2.1.0", features = ["encryption"] }
+//! mc_protocol = { version = "2", features = ["encryption"] }
 //! ```
 //!
 //! To disable all default features:
 //!
 //! ```toml
 //! [dependencies]
-//! mc_protocol = { version = "2.1.0", default-features = false }
+//! mc_protocol = { version = "2", default-features = false }
 //! ```
 //!
 //! ## Modules
@@ -112,6 +112,10 @@
 //! The protocol wraps every packet in a length-prefixed frame.
 //! [`RawPacket`](packet::RawPacket) is the on-wire frame (length VarInt + data).
 //! [`UncompressedPacket`](packet::UncompressedPacket) is the decoded form (packet ID + payload bytes).
+//!
+//! Incoming frames are capped at [`MAX_PACKET_LENGTH`](packet::MAX_PACKET_LENGTH)
+//! (2 MiB, the protocol's 3-byte VarInt limit), so a malicious length prefix
+//! cannot trigger an unbounded allocation.
 //!
 //! ### Sync
 //!

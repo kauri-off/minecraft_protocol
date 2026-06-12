@@ -14,6 +14,7 @@
 //!
 //! - [`Serialize`] and [`Deserialize`] traits for encoding/decoding protocol fields
 //! - [`SerializationError`] for serialization error handling
+//! - [`RawBytes`] for unprefixed byte payloads
 //! - [`VarInt`] and [`VarLong`] — variable-length integer types used throughout the protocol
 //! - [`RawPacket`] and [`UncompressedPacket`] for packet framing
 //! - [`PacketId`] trait and [`PacketError`] for packet I/O
@@ -24,7 +25,7 @@
 //! AES-128-CFB8 types.
 
 // --- Core serialization ---
-pub use crate::ser::{Deserialize, Serialize, SerializationError};
+pub use crate::ser::{Deserialize, RawBytes, Serialize, SerializationError};
 
 // --- Variable-length integers ---
 pub use crate::varint::{VarInt, VarLong};

@@ -196,11 +196,23 @@ pub fn serialize_string_with_max<W: Write + Unpin>(
 }
 
 /// Decode a `String` enforcing a maximum UTF-16 length.
+///
+/// The declared byte length is validated *before* any allocation: it must be
+/// non-negative and at most `max_utf16 * 3` (a UTF-16 code unit occupies at
+/// most 3 bytes in UTF-8), so a malicious length prefix cannot trigger a
+/// huge allocation.
 pub fn deserialize_string_with_max<R: Read + Unpin>(
     reader: &mut R,
     max_utf16: usize,
 ) -> Result<String, SerializationError> {
-    let byte_len = VarInt::read_sync(reader)?.0 as usize;
+    let byte_len = VarInt::read_sync(reader)?.0;
+    if byte_len < 0 {
+        return Err(SerializationError::InvalidLength(byte_len as i64));
+    }
+    let byte_len = byte_len as usize;
+    if byte_len > max_utf16.saturating_mul(3) {
+        return Err(SerializationError::InvalidLength(byte_len as i64));
+    }
     let mut buf = vec![0u8; byte_len];
     reader.read_exact(&mut buf)?;
     let s = String::from_utf8(buf)?;
@@ -305,7 +317,10 @@ impl<T: Deserialize> Deserialize for Vec<T> {
         if len < 0 {
             return Err(SerializationError::InvalidLength(len as i64));
         }
-        let mut result = Vec::with_capacity(len as usize);
+        // Cap the pre-allocation: the length prefix is attacker-controlled,
+        // so don't reserve gigabytes up front. The vector still grows to the
+        // full length as elements are actually read.
+        let mut result = Vec::with_capacity((len as usize).min(4096));
         for _ in 0..len {
             result.push(T::deserialize(reader)?);
         }

@@ -54,6 +54,19 @@ pub enum PacketError {
 }
 
 // ---------------------------------------------------------------------------
+// Limits
+// ---------------------------------------------------------------------------
+
+/// Maximum size in bytes of a packet frame (and of an uncompressed packet body).
+///
+/// The protocol encodes the frame length as a VarInt of at most 3 bytes, so
+/// the largest representable value is `2^21 - 1`. The vanilla client and
+/// server both enforce this limit; [`RawPacket::read_sync`] /
+/// [`RawPacket::read_async`] reject larger frames, which also prevents a
+/// malicious length prefix from triggering a multi-gigabyte allocation.
+pub const MAX_PACKET_LENGTH: usize = 2_097_151;
+
+// ---------------------------------------------------------------------------
 // PacketId trait
 // ---------------------------------------------------------------------------
 
@@ -87,9 +100,12 @@ impl RawPacket {
     // --- Sync read/write ---
 
     /// Read a length-prefixed frame from a synchronous reader.
+    ///
+    /// Fails with [`PacketError::InvalidLength`] if the declared length is
+    /// negative or exceeds [`MAX_PACKET_LENGTH`].
     pub fn read_sync<R: Read>(reader: &mut R) -> Result<Self, PacketError> {
         let len = VarInt::read_sync(reader)?;
-        if len.0 < 0 {
+        if len.0 < 0 || len.0 as usize > MAX_PACKET_LENGTH {
             return Err(PacketError::InvalidLength(len.0 as i64));
         }
         let mut data = vec![0u8; len.0 as usize];
@@ -107,10 +123,13 @@ impl RawPacket {
     // --- Async read/write ---
 
     /// Read a length-prefixed frame from an async reader (requires `async` feature).
+    ///
+    /// Fails with [`PacketError::InvalidLength`] if the declared length is
+    /// negative or exceeds [`MAX_PACKET_LENGTH`].
     #[cfg(feature = "async")]
     pub async fn read_async<R: AsyncReadExt + Unpin>(reader: &mut R) -> Result<Self, PacketError> {
         let len = VarInt::read_async(reader).await?;
-        if len.0 < 0 {
+        if len.0 < 0 || len.0 as usize > MAX_PACKET_LENGTH {
             return Err(PacketError::InvalidLength(len.0 as i64));
         }
         let mut data = vec![0u8; len.0 as usize];
@@ -133,7 +152,8 @@ impl RawPacket {
 
     /// Interpret this frame as an uncompressed packet (no compression in effect).
     ///
-    /// Returns `None` if the data is empty.
+    /// Fails with an I/O error (`UnexpectedEof`) if the frame is too short to
+    /// contain a packet ID.
     pub fn as_uncompressed(&self) -> Result<UncompressedPacket, PacketError> {
         let mut cursor = Cursor::new(&self.data);
         let packet_id = VarInt::read_sync(&mut cursor)?;
@@ -152,10 +172,12 @@ impl RawPacket {
     /// first field is `data_length` (VarInt): if 0, the rest is uncompressed;
     /// otherwise it is the uncompressed length and the rest is zlib-deflated.
     ///
-    /// Returns `Err` if decompression fails.
+    /// Returns `Err` if decompression fails, if `data_length` is negative or
+    /// exceeds [`MAX_PACKET_LENGTH`], or if the decompressed size does not
+    /// match the declared `data_length` (zip-bomb guard).
     #[cfg(feature = "compression")]
     pub fn uncompress(&self, threshold: Option<i32>) -> Result<UncompressedPacket, PacketError> {
-        use crate::compression::decompress_zlib;
+        use crate::compression::decompress_zlib_limited;
 
         if threshold.is_none() {
             return self.as_uncompressed();
@@ -164,6 +186,10 @@ impl RawPacket {
         let mut cursor = Cursor::new(&self.data);
         let data_length = VarInt::read_sync(&mut cursor)?;
         let compressed_start = cursor.position() as usize;
+
+        if data_length.0 < 0 || data_length.0 as usize > MAX_PACKET_LENGTH {
+            return Err(PacketError::InvalidLength(data_length.0 as i64));
+        }
 
         if data_length.0 == 0 {
             // Not compressed — read packet_id and payload directly
@@ -176,9 +202,13 @@ impl RawPacket {
             });
         }
 
-        // Compressed payload
+        // Compressed payload — never inflate past the declared size, and
+        // require the declared size to be exact.
         let compressed_data = &self.data[compressed_start..];
-        let uncompressed = decompress_zlib(compressed_data)?;
+        let uncompressed = decompress_zlib_limited(compressed_data, data_length.0 as usize)?;
+        if uncompressed.len() != data_length.0 as usize {
+            return Err(PacketError::InvalidLength(uncompressed.len() as i64));
+        }
         let mut inner = Cursor::new(&uncompressed);
         let packet_id = VarInt::read_sync(&mut inner)?;
         let pos = inner.position() as usize;

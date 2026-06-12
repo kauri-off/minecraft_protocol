@@ -1,6 +1,6 @@
 [package]
 name = "mc_protocol_derive"
-version = "2.0.1"
+version = "2.0.2"
 edition = "2021"
 description = "Proc-macro derive crate for mc_protocol — Minecraft Java Edition protocol serialization"
 license = "MIT"

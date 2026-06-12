@@ -1,8 +1,8 @@
-//! Big-endian integer trait used by the protocol serialization layer.
+//! Big-endian integer trait for fixed-width primitives.
 //!
-//! This trait is implemented for all standard integer and float types. It is
-//! used internally by `ser.rs` to provide blanket `Serialize`/`Deserialize`
-//! implementations and is also useful for users writing custom packet fields.
+//! [`Integer`] is implemented for all standard integer and float types and is
+//! a convenience for users writing custom packet field codecs that need
+//! generic big-endian byte conversion.
 
 /// A type that can be serialized to and from a fixed-length big-endian byte sequence.
 pub trait Integer: Sized + Copy {
@@ -10,6 +10,10 @@ pub trait Integer: Sized + Copy {
     fn to_bytes(self) -> Vec<u8>;
 
     /// Deserialize from big-endian bytes.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `bytes.len()` is not exactly [`byte_len`](Integer::byte_len).
     fn from_bytes(bytes: &[u8]) -> Self;
 
     /// The byte length of the serialized form.

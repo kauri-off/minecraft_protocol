@@ -93,6 +93,69 @@ fn packet_no_threshold_no_compression() {
 }
 
 #[test]
+fn uncompress_negative_data_length_is_rejected() {
+    use mc_protocol::packet::RawPacket;
+    use mc_protocol::ser::Serialize;
+    use mc_protocol::varint::VarInt;
+
+    // Frame whose data_length field is negative
+    let mut data = Vec::new();
+    VarInt(-1).serialize(&mut data).unwrap();
+    data.extend_from_slice(&[0x00]);
+
+    let raw = RawPacket::new(data);
+    assert!(raw.uncompress(Some(256)).is_err());
+}
+
+#[test]
+fn uncompress_mismatched_data_length_is_rejected() {
+    use mc_protocol::packet::RawPacket;
+    use mc_protocol::ser::Serialize;
+    use mc_protocol::varint::VarInt;
+
+    // Compress a 512-byte inner packet but declare data_length = 10.
+    // The zip-bomb guard must refuse to inflate past the declared size.
+    let mut inner = Vec::new();
+    VarInt(0x26).serialize(&mut inner).unwrap();
+    inner.extend_from_slice(&[0u8; 512]);
+    let compressed = compress_zlib(&inner).unwrap();
+
+    let mut data = Vec::new();
+    VarInt(10).serialize(&mut data).unwrap();
+    data.extend_from_slice(&compressed);
+
+    let raw = RawPacket::new(data);
+    assert!(raw.uncompress(Some(256)).is_err());
+}
+
+#[test]
+fn compress_level_out_of_range_is_clamped() {
+    let data = b"clamped level test data";
+    // Level 99 must behave like level 9 rather than panicking or erroring
+    let compressed = compress_zlib_level(data, 99).unwrap();
+    assert_eq!(decompress_zlib(&compressed).unwrap(), data);
+}
+
+#[test]
+fn decompress_zlib_limited_allows_exact_size() {
+    use mc_protocol::compression::decompress_zlib_limited;
+
+    let data = b"exactly sized payload";
+    let compressed = compress_zlib(data).unwrap();
+    let out = decompress_zlib_limited(&compressed, data.len()).unwrap();
+    assert_eq!(out, data);
+}
+
+#[test]
+fn decompress_zlib_limited_rejects_oversize() {
+    use mc_protocol::compression::decompress_zlib_limited;
+
+    let data = vec![0xAA; 4096];
+    let compressed = compress_zlib(&data).unwrap();
+    assert!(decompress_zlib_limited(&compressed, 100).is_err());
+}
+
+#[test]
 fn large_packet_round_trip_preserves_exact_content() {
     // Simulate a chunk data packet with lots of bytes
     let payload: Vec<u8> = (0..2000).map(|i| (i % 256) as u8).collect();

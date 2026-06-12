@@ -1,6 +1,6 @@
 //! Tests for packet framing and the derive macro.
 
-use mc_protocol::packet::{PacketId, RawPacket, UncompressedPacket};
+use mc_protocol::packet::{PacketError, PacketId, RawPacket, UncompressedPacket, MAX_PACKET_LENGTH};
 use mc_protocol::ser::{Deserialize, Serialize};
 use mc_protocol::varint::VarInt;
 use std::io::Cursor;
@@ -114,6 +114,33 @@ fn raw_packet_write_and_read_sync() {
 }
 
 #[test]
+fn raw_packet_negative_length_is_rejected() {
+    let mut buf = Vec::new();
+    VarInt(-1).serialize(&mut buf).unwrap();
+    let err = RawPacket::read_sync(&mut Cursor::new(&buf)).unwrap_err();
+    assert!(matches!(err, PacketError::InvalidLength(-1)));
+}
+
+#[test]
+fn raw_packet_oversized_length_is_rejected() {
+    // Declares a frame larger than the protocol maximum (2^21 - 1). Must be
+    // rejected up front instead of allocating gigabytes.
+    let mut buf = Vec::new();
+    VarInt(MAX_PACKET_LENGTH as i32 + 1).serialize(&mut buf).unwrap();
+    let err = RawPacket::read_sync(&mut Cursor::new(&buf)).unwrap_err();
+    assert!(matches!(err, PacketError::InvalidLength(_)));
+}
+
+#[test]
+fn raw_packet_moderately_large_frame_round_trips() {
+    let raw = RawPacket::new(vec![0x42; 100_000]);
+    let mut buf = Vec::new();
+    raw.write_sync(&mut buf).unwrap();
+    let decoded = RawPacket::read_sync(&mut Cursor::new(&buf)).unwrap();
+    assert_eq!(decoded.data, raw.data);
+}
+
+#[test]
 fn raw_packet_empty_payload() {
     let raw = RawPacket::new(vec![]);
     let mut buf = Vec::new();
@@ -193,11 +220,38 @@ fn nested_struct_without_packet_id_round_trips() {
 
 #[test]
 fn nested_struct_has_no_packet_id_const() {
-    // Item does not have #[packet(...)], so PACKET_ID must not exist and
-    // PacketId must not be implemented. If either were generated, this test
-    // file would fail to compile due to the outer-packet assertions below
-    // still needing to work. Sanity-check that Inventory still has an ID.
+    // Item has no #[packet(...)] attribute, so the derive must not generate
+    // PACKET_ID / PacketId for it, while Inventory (which has the attribute)
+    // still gets its ID. Only the positive half is assertable here; the
+    // negative half is covered by `Item` compiling without the attribute.
     assert_eq!(Inventory::PACKET_ID, 0x10);
+}
+
+// ---------------------------------------------------------------------------
+// Packet derive on generic structs
+// ---------------------------------------------------------------------------
+
+#[derive(mc_protocol::Packet, Debug, PartialEq)]
+#[packet(0x42)]
+struct Wrapper<T> {
+    label: String,
+    value: T,
+}
+
+#[test]
+fn generic_struct_round_trips() {
+    let original = Wrapper {
+        label: "count".to_string(),
+        value: VarInt(1234),
+    };
+
+    let mut buf = Vec::new();
+    original.serialize(&mut buf).unwrap();
+
+    let decoded = Wrapper::<VarInt>::deserialize(&mut Cursor::new(&buf)).unwrap();
+    assert_eq!(decoded, original);
+    assert_eq!(Wrapper::<VarInt>::PACKET_ID, 0x42);
+    assert_eq!(original.packet_id(), 0x42);
 }
 
 // ---------------------------------------------------------------------------

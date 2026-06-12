@@ -99,13 +99,10 @@ impl VarInt {
         let mut position: u32 = 0;
 
         loop {
+            // read_exact retries on ErrorKind::Interrupted and yields
+            // UnexpectedEof when the stream ends mid-value.
             let mut byte_buf = [0u8; 1];
-            if reader.read(&mut byte_buf)? == 0 {
-                return Err(VarIntError::Io(io::Error::new(
-                    io::ErrorKind::UnexpectedEof,
-                    "Unexpected EOF reading VarInt",
-                )));
-            }
+            reader.read_exact(&mut byte_buf)?;
 
             let byte = byte_buf[0];
             value |= ((byte & SEGMENT_BITS) as i32) << position;
@@ -232,13 +229,10 @@ impl VarLong {
         let mut position: u32 = 0;
 
         loop {
+            // read_exact retries on ErrorKind::Interrupted and yields
+            // UnexpectedEof when the stream ends mid-value.
             let mut byte_buf = [0u8; 1];
-            if reader.read(&mut byte_buf)? == 0 {
-                return Err(VarIntError::Io(io::Error::new(
-                    io::ErrorKind::UnexpectedEof,
-                    "Unexpected EOF reading VarLong",
-                )));
-            }
+            reader.read_exact(&mut byte_buf)?;
 
             let byte = byte_buf[0];
             value |= ((byte & SEGMENT_BITS) as i64) << position;

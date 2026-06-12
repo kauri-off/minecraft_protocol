@@ -60,7 +60,7 @@ impl Cfb8Encryptor {
     /// The IV is the same as the key, as required by Minecraft.
     pub fn new(key: &[u8; 16]) -> io::Result<Self> {
         let mut crypter = Crypter::new(Cipher::aes_128_cfb8(), Mode::Encrypt, key, Some(key))
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+            .map_err(io::Error::other)?;
         crypter.pad(false);
         Ok(Self { crypter })
     }
@@ -71,7 +71,7 @@ impl Cfb8Encryptor {
         let n = self
             .crypter
             .update(plaintext, &mut output)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+            .map_err(io::Error::other)?;
         output.truncate(n);
         Ok(output)
     }
@@ -87,7 +87,7 @@ impl Cfb8Decryptor {
     /// The IV is the same as the key, as required by Minecraft.
     pub fn new(key: &[u8; 16]) -> io::Result<Self> {
         let mut crypter = Crypter::new(Cipher::aes_128_cfb8(), Mode::Decrypt, key, Some(key))
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+            .map_err(io::Error::other)?;
         crypter.pad(false);
         Ok(Self { crypter })
     }
@@ -98,7 +98,7 @@ impl Cfb8Decryptor {
         let n = self
             .crypter
             .update(ciphertext, &mut output)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+            .map_err(io::Error::other)?;
         output.truncate(n);
         Ok(output)
     }
@@ -226,10 +226,20 @@ impl<R: AsyncRead + Unpin> AsyncRead for AsyncCfb8ReadHalf<R> {
 }
 
 /// Async write-half that transparently encrypts outgoing bytes.
+///
+/// Input is encrypted exactly once and held in an internal buffer until the
+/// inner writer accepts it, so backpressure (`Poll::Pending`) or partial
+/// writes from the inner writer never desynchronize the cipher state.
+/// Call `flush().await` (or `shutdown().await`) to ensure buffered ciphertext
+/// reaches the inner writer.
 #[cfg(feature = "async")]
 pub struct AsyncCfb8WriteHalf<W> {
     inner: W,
     encryptor: Cfb8Encryptor,
+    /// Encrypted bytes not yet accepted by the inner writer.
+    buffer: Vec<u8>,
+    /// Number of bytes at the front of `buffer` already written.
+    written: usize,
 }
 
 #[cfg(feature = "async")]
@@ -239,12 +249,45 @@ impl<W> AsyncCfb8WriteHalf<W> {
         Ok(Self {
             inner,
             encryptor: Cfb8Encryptor::new(key)?,
+            buffer: Vec::new(),
+            written: 0,
         })
     }
 
     /// Unwrap the inner writer.
+    ///
+    /// Any encrypted bytes still buffered (not yet flushed) are discarded.
     pub fn into_inner(self) -> W {
         self.inner
+    }
+}
+
+#[cfg(feature = "async")]
+impl<W: AsyncWrite + Unpin> AsyncCfb8WriteHalf<W> {
+    /// Write buffered ciphertext to the inner writer until empty or blocked.
+    fn poll_drain_buffer(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        while self.written < self.buffer.len() {
+            let Self {
+                inner,
+                buffer,
+                written,
+                ..
+            } = self;
+            match Pin::new(&mut *inner).poll_write(cx, &buffer[*written..]) {
+                Poll::Ready(Ok(0)) => {
+                    return Poll::Ready(Err(io::Error::new(
+                        io::ErrorKind::WriteZero,
+                        "inner writer accepted zero bytes",
+                    )))
+                }
+                Poll::Ready(Ok(n)) => self.written += n,
+                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                Poll::Pending => return Poll::Pending,
+            }
+        }
+        self.buffer.clear();
+        self.written = 0;
+        Poll::Ready(Ok(()))
     }
 }
 
@@ -255,22 +298,45 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for AsyncCfb8WriteHalf<W> {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
+        // Previously encrypted bytes must reach the writer first, otherwise
+        // the cipher state and the wire would diverge.
+        match self.poll_drain_buffer(cx) {
+            Poll::Ready(Ok(())) => {}
+            Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+            Poll::Pending => return Poll::Pending,
+        }
+
+        if buf.is_empty() {
+            return Poll::Ready(Ok(0));
+        }
+
         let encrypted = match self.encryptor.encrypt(buf) {
             Ok(e) => e,
             Err(e) => return Poll::Ready(Err(e)),
         };
-        match Pin::new(&mut self.inner).poll_write(cx, &encrypted) {
-            Poll::Ready(Ok(_)) => Poll::Ready(Ok(buf.len())),
+        self.buffer = encrypted;
+        self.written = 0;
+
+        // Opportunistically write; whatever the inner writer doesn't take now
+        // stays buffered and is drained on the next write/flush/shutdown.
+        if let Poll::Ready(Err(e)) = self.poll_drain_buffer(cx) {
+            return Poll::Ready(Err(e));
+        }
+        Poll::Ready(Ok(buf.len()))
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        match self.poll_drain_buffer(cx) {
+            Poll::Ready(Ok(())) => Pin::new(&mut self.inner).poll_flush(cx),
             other => other,
         }
     }
 
-    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.inner).poll_flush(cx)
-    }
-
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.inner).poll_shutdown(cx)
+        match self.poll_drain_buffer(cx) {
+            Poll::Ready(Ok(())) => Pin::new(&mut self.inner).poll_shutdown(cx),
+            other => other,
+        }
     }
 }
 

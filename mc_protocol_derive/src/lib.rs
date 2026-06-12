@@ -8,7 +8,7 @@ extern crate proc_macro;
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
-use syn::{parse_macro_input, Data, DeriveInput, Expr, Fields};
+use syn::{parse_macro_input, parse_quote, Data, DeriveInput, Expr, Fields};
 
 /// Derives `Packet` behaviour for a struct.
 ///
@@ -18,8 +18,10 @@ use syn::{parse_macro_input, Data, DeriveInput, Expr, Fields};
 ///   structs that appear inside another packet's fields and only need
 ///   `Serialize`/`Deserialize`). When present, the derive also generates a
 ///   `PACKET_ID: i32` associated const and a [`PacketId`] impl.
-/// - `#[packet_field(optional)]` — marks a field as `Option<T>` encoded with a presence boolean
-/// - `#[packet_field(prefixed_array)]` — marks a field as `Vec<T>` encoded with a VarInt length prefix
+///
+/// `Option<T>` fields are encoded with a boolean presence flag and `Vec<T>`
+/// fields with a VarInt length prefix automatically — no field attribute is
+/// needed.
 ///
 /// # Examples
 ///
@@ -109,14 +111,30 @@ fn expand_packet(input: &DeriveInput) -> syn::Result<TokenStream2> {
         })
         .collect();
 
+    // Generic structs: the trait impls require every type parameter to be
+    // serializable/deserializable itself.
+    let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
+
+    let ser_generics = add_trait_bounds(
+        input.generics.clone(),
+        parse_quote!(mc_protocol::ser::Serialize),
+    );
+    let (ser_impl_generics, _, ser_where_clause) = ser_generics.split_for_impl();
+
+    let de_generics = add_trait_bounds(
+        input.generics.clone(),
+        parse_quote!(mc_protocol::ser::Deserialize),
+    );
+    let (de_impl_generics, _, de_where_clause) = de_generics.split_for_impl();
+
     let packet_id_impls = packet_id_expr.map(|expr| {
         quote! {
-            impl #struct_name {
+            impl #impl_generics #struct_name #ty_generics #where_clause {
                 /// The numeric ID that identifies this packet on the wire.
                 pub const PACKET_ID: i32 = #expr as i32;
             }
 
-            impl mc_protocol::packet::PacketId for #struct_name {
+            impl #impl_generics mc_protocol::packet::PacketId for #struct_name #ty_generics #where_clause {
                 fn packet_id(&self) -> i32 {
                     Self::PACKET_ID
                 }
@@ -127,7 +145,7 @@ fn expand_packet(input: &DeriveInput) -> syn::Result<TokenStream2> {
     let expanded = quote! {
         #packet_id_impls
 
-        impl mc_protocol::ser::Serialize for #struct_name {
+        impl #ser_impl_generics mc_protocol::ser::Serialize for #struct_name #ty_generics #ser_where_clause {
             fn serialize<W: std::io::Write + Unpin>(
                 &self,
                 __writer: &mut W,
@@ -137,7 +155,7 @@ fn expand_packet(input: &DeriveInput) -> syn::Result<TokenStream2> {
             }
         }
 
-        impl mc_protocol::ser::Deserialize for #struct_name {
+        impl #de_impl_generics mc_protocol::ser::Deserialize for #struct_name #ty_generics #de_where_clause {
             fn deserialize<R: std::io::Read + Unpin>(
                 __reader: &mut R,
             ) -> Result<Self, mc_protocol::ser::SerializationError> {
@@ -149,6 +167,16 @@ fn expand_packet(input: &DeriveInput) -> syn::Result<TokenStream2> {
     };
 
     Ok(expanded)
+}
+
+/// Add `bound` to every type parameter in `generics`.
+fn add_trait_bounds(mut generics: syn::Generics, bound: syn::TypeParamBound) -> syn::Generics {
+    for param in &mut generics.params {
+        if let syn::GenericParam::Type(type_param) = param {
+            type_param.bounds.push(bound.clone());
+        }
+    }
+    generics
 }
 
 fn extract_packet_id(input: &DeriveInput) -> syn::Result<Option<Expr>> {

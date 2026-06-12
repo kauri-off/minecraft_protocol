@@ -209,4 +209,88 @@ mod async_tests {
         read_half.read_exact(&mut output).await.unwrap();
         assert_eq!(output, plaintext);
     }
+
+    /// An `AsyncWrite` that exercises backpressure: it alternates between
+    /// returning `Poll::Pending` and accepting a single byte per call.
+    struct BackpressuredWriter {
+        data: Vec<u8>,
+        pending_next: bool,
+    }
+
+    impl BackpressuredWriter {
+        fn new() -> Self {
+            Self {
+                data: Vec::new(),
+                pending_next: true,
+            }
+        }
+    }
+
+    impl tokio::io::AsyncWrite for BackpressuredWriter {
+        fn poll_write(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+            buf: &[u8],
+        ) -> std::task::Poll<std::io::Result<usize>> {
+            if self.pending_next {
+                self.pending_next = false;
+                cx.waker().wake_by_ref();
+                return std::task::Poll::Pending;
+            }
+            self.pending_next = true;
+            self.data.push(buf[0]);
+            std::task::Poll::Ready(Ok(1))
+        }
+
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    /// Regression test: `Poll::Pending` or partial writes from the inner
+    /// writer must not desynchronize the cipher state or drop ciphertext.
+    #[tokio::test]
+    async fn async_write_half_survives_backpressure_and_partial_writes() {
+        let plaintext = b"Backpressure must not corrupt the encrypted stream";
+
+        let mut write_half =
+            AsyncCfb8WriteHalf::new(BackpressuredWriter::new(), TEST_KEY).unwrap();
+        // Write in small chunks to interleave encryption with backpressure
+        for chunk in plaintext.chunks(7) {
+            write_half.write_all(chunk).await.unwrap();
+        }
+        write_half.flush().await.unwrap();
+
+        let written = write_half.into_inner().data;
+        assert_eq!(written.len(), plaintext.len(), "no ciphertext may be lost");
+
+        let mut dec = mc_protocol::encryption::Cfb8Decryptor::new(TEST_KEY).unwrap();
+        let recovered = dec.decrypt(&written).unwrap();
+        assert_eq!(recovered, plaintext);
+    }
+
+    /// `flush` must drain ciphertext still buffered after a `Pending` write.
+    #[tokio::test]
+    async fn async_write_half_flush_drains_buffer() {
+        let plaintext = b"flush me";
+
+        let mut write_half =
+            AsyncCfb8WriteHalf::new(BackpressuredWriter::new(), TEST_KEY).unwrap();
+        write_half.write_all(plaintext).await.unwrap();
+        write_half.flush().await.unwrap();
+
+        let written = write_half.into_inner().data;
+        let mut dec = mc_protocol::encryption::Cfb8Decryptor::new(TEST_KEY).unwrap();
+        assert_eq!(dec.decrypt(&written).unwrap(), plaintext);
+    }
 }

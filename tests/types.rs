@@ -91,7 +91,7 @@ fn f32_round_trip() {
 
 #[test]
 fn f64_round_trip() {
-    for v in [0.0f64, 1.0, -1.0, 3.14159265358979] {
+    for v in [0.0f64, 1.0, -1.0, std::f64::consts::PI] {
         let mut buf = Vec::new();
         v.serialize(&mut buf).unwrap();
         let decoded = f64::deserialize(&mut Cursor::new(&buf)).unwrap();
@@ -140,6 +140,39 @@ fn string_with_emoji_counts_as_two_utf16_units() {
     s.serialize(&mut buf).unwrap();
     let decoded = String::deserialize(&mut Cursor::new(&buf)).unwrap();
     assert_eq!(decoded, s);
+}
+
+#[test]
+fn string_over_max_utf16_length_fails_to_serialize() {
+    use mc_protocol::ser::{serialize_string_with_max, SerializationError};
+
+    let s = "ab";
+    let mut buf = Vec::new();
+    let err = serialize_string_with_max(s, &mut buf, 1).unwrap_err();
+    assert!(matches!(err, SerializationError::StringTooLong { .. }));
+}
+
+#[test]
+fn string_negative_length_prefix_is_rejected() {
+    use mc_protocol::varint::VarInt;
+
+    // VarInt(-1) as the byte-length prefix
+    let mut buf = Vec::new();
+    VarInt(-1).serialize(&mut buf).unwrap();
+    let result = String::deserialize(&mut Cursor::new(&buf));
+    assert!(result.is_err(), "negative string length must be rejected");
+}
+
+#[test]
+fn string_huge_declared_length_is_rejected_before_allocating() {
+    use mc_protocol::varint::VarInt;
+
+    // Declares i32::MAX bytes but provides none. Must fail fast on the
+    // length check rather than attempting a 2 GiB allocation.
+    let mut buf = Vec::new();
+    VarInt(i32::MAX).serialize(&mut buf).unwrap();
+    let result = String::deserialize(&mut Cursor::new(&buf));
+    assert!(result.is_err(), "oversized string length must be rejected");
 }
 
 // ---------------------------------------------------------------------------
@@ -221,6 +254,29 @@ fn vec_string_round_trip() {
     v.serialize(&mut buf).unwrap();
     let decoded = Vec::<String>::deserialize(&mut Cursor::new(&buf)).unwrap();
     assert_eq!(decoded, v);
+}
+
+#[test]
+fn vec_negative_length_prefix_is_rejected() {
+    use mc_protocol::ser::SerializationError;
+    use mc_protocol::varint::VarInt;
+
+    let mut buf = Vec::new();
+    VarInt(-5).serialize(&mut buf).unwrap();
+    let err = Vec::<u8>::deserialize(&mut Cursor::new(&buf)).unwrap_err();
+    assert!(matches!(err, SerializationError::InvalidLength(-5)));
+}
+
+#[test]
+fn vec_huge_declared_length_fails_without_huge_allocation() {
+    use mc_protocol::varint::VarInt;
+
+    // Declares i32::MAX elements but provides none — must error on the
+    // missing data, not pre-allocate gigabytes of capacity.
+    let mut buf = Vec::new();
+    VarInt(i32::MAX).serialize(&mut buf).unwrap();
+    let result = Vec::<u64>::deserialize(&mut Cursor::new(&buf));
+    assert!(result.is_err());
 }
 
 // ---------------------------------------------------------------------------
